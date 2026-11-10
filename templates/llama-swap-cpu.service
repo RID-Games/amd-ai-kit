@@ -1,0 +1,29 @@
+[Unit]
+Description=llama-swap on CPU RAM — GLM-5.3-Flash via colibri CPU expert-streaming
+Documentation=https://github.com/mostlygeek/llama-swap
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=${REQUIRES_MOUNT}
+
+[Service]
+Type=simple
+WorkingDirectory=${WORKDIR}
+ExecStart=${LLAMA_SWAP_BIN} \
+    --config ${CONFIG_DIR}/llama-swap-cpu.yaml \
+    --listen :${PORT_CPU}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+LimitNOFILE=65536
+# Bound GLM's footprint so a runaway dies inside this cgroup instead of
+# triggering a GLOBAL OOM that freezes the desktop (2026-09-05: 3 kills).
+# glm53 needs ~13.5 GB dense + GLM53_EXPERT_GB LRU + overhead.
+MemoryMax=${GLM_MEMORY_MAX}
+
+[Install]
+WantedBy=default.target

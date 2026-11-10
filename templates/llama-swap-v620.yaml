@@ -1,0 +1,84 @@
+# llama-swap config — V620 (32 GB server card) — "llm" profile
+# Manages the single 27B Q6_K Qwen3.8 model on the 32 GB V620 card.
+# Includes --spec-type mtp for the Multi-Token Prediction speculative
+# decoding block (blk.64.nextn.*) baked into the GGUF.
+#
+# The V620 is multi-tenant: qwen3.8-27b (this LLM) PLUS the native gen workers
+# (SDXL-Turbo, Hunyuan3D-2, Breeze TTS 2) all share the 32 GB card. Kokoro TTS
+# used to be the resident speech daemon here and has been replaced by Breeze TTS
+# 2, which is a run-and-exit worker on this same card rather than a daemon.
+#
+# MiniMax-H3 is a fourth intended tenant and is NOT wired into local-studio: 38 GB
+# of weights sit at /mnt/ai-data/.cache/models/MiniMax-H3 and it is driven by
+# sd-cli (stable-diffusion.cpp), not llama.cpp. It has no DSH tool and therefore
+# no free_card() call, so nothing evicts qwen for it — run it through v620-run.
+# Its only entry point today is
+# /mnt/ai-data/3d_gen_v620/libexec/h3_smoke_watch.sh (a smoke test, not a tool).
+#
+# globalTTL below is 0, so the LLM is never unloaded on a timer — it holds the
+# card until something else needs it. That eviction is requested by the worker
+# itself, not by this config: the local-studio workers call _v620.free_card()
+# before loading, which POSTs /unload when the card cannot fit them. For a
+# manual guarantee, run any native worker through v620-run (it POSTs
+# /unload + kills orphan workers before launching).
+#
+# Rendered from template by install.sh — edit .env, not this file.
+
+# Measured 2026-10-05: load time is set by whether the 20.5 GiB model's pages
+# are resident, and by how much free memory is left for the page cache.
+#   warm (cached)                 ~11 s
+#   cold, idle box       (~22 GiB available)  ~62 s
+#   cold with gemma resident (~21 GiB)       ~127 s
+#   against <20 GiB available               >300 s
+# In that last band the kernel evicts pages as fast as they fault in, so the
+# file is re-read repeatedly. The old 300 s ceiling sat inside it, so 12 of 25
+# attempts that day were killed and retried, compounding the problem. This
+# clears the slowest observed case; it does not fix that band — keeping
+# available memory above ~22 GiB does.
+healthCheckTimeout: 900
+logLevel: info
+logToStdout: both
+sendLoadingState: true
+
+# 0 = never auto-unload. The V620 serves only inference in normal operation, so
+# qwen keeps the card warm rather than paying an 11s-7m20s reload every time a
+# burst of work ends. Eviction is event-driven instead of timed: image_gen,
+# mesh_gen and tts call _v620.free_card(need_bytes) before loading and POST
+# /unload when the card cannot fit them, and v620-run does the same for a manual
+# run.
+#
+# This is deliberately NOT the failure mode that bit llama-swap-cpu earlier: GLM
+# sat on a ttl:0 and starved the box because *nothing* evicted it. Here the
+# evictor exists and runs on every gen call. The consequence is that the next
+# qwen request after image or mesh work pays the reload, since that work evicted
+# it; tts asks for only 4 GiB, which fits beside qwen's 24.5 GiB, so it does not.
+globalTTL: 0
+
+# Auto-assign starting port. 5810 is for V620 llama-swap (per-host unique).
+startPort: ${STARTPORT_LLM}
+
+models:
+  qwen3.8-27b:
+    name: "Qwen3.8-27B (Alibaba, V620, MTP speculative decode)"
+    cmd: |
+      ${LLAMA_SERVER}
+        --model ${QWEN27B_GGUF}
+        --alias qwen3.8-27b
+        --host 127.0.0.1 --port ${PORT}
+        --ctx-size 196608
+        --n-gpu-layers 99
+        --threads 6 --threads-batch 8 --parallel 1
+        --batch-size 2048 --ubatch-size 512
+        -ctk q8_0 -ctv q8_0
+        --flash-attn auto --load-mode mmap
+        --reasoning off
+        --spec-type draft-mtp --spec-draft-n-max 2
+        --temp 0.7 --top-p 0.95 --top-k 20
+    env:
+      # Select the card by UUID, not by index. Binding the V620 after boot (so
+      # the 9060 XT keeps renderD128) puts the 9060 XT at HIP index 0, which
+      # pointed this model at the 16GB card and OOM'd a 20.9GB allocation.
+      - "HIP_VISIBLE_DEVICES=${GPU_LLM_UUID}"
+      - "LD_LIBRARY_PATH=${THEROCK_LIB}"
+    aliases:
+      - qwen-local

@@ -1,0 +1,25 @@
+[Unit]
+Description=llama-swap on AMD RX 9060 XT (GPU 1) — Gemma-4 12B (primary chat surface)
+Documentation=https://github.com/mostlygeek/llama-swap
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=${REQUIRES_MOUNT}
+
+[Service]
+Type=simple
+WorkingDirectory=${WORKDIR}
+ExecStart=${LLAMA_SWAP_BIN} \
+    --config ${CONFIG_DIR}/llama-swap-9060xt.yaml \
+    --listen :${PORT_CHAT}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

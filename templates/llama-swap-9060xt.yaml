@@ -1,0 +1,123 @@
+# llama-swap config — 16 GB RDNA4 card (RX 9060/9070 XT class) — "chat" profile
+# Manages local models on the 16 GB RDNA4 card:
+#   - gemma-4-12b     (6.5 GB QAT Q4_0) — primary chat model
+# Hermes-4 14B and Qwen3-14B were both uninstalled 2026-09-05 (user picked
+# Gemma as primary). MiniCPM5-2B added 2026-09-10 — small (2.5 GB Q8_0) but
+# lives in the same exclusive group so it still triggers a Gemma unload on
+# first request rather than co-residency OOM. Both fit on a 16 GB card but
+# not both with full 131K ctx KV caches.
+#
+# Rendered from template by install.sh — edit .env, not this file.
+
+# 5-minute health check: large YaRN contexts have very long first-token latency
+# on first load. Subsequent responses are fast (KV cache is warm).
+healthCheckTimeout: 500
+logLevel: info
+logToStdout: both
+sendLoadingState: true
+
+# Auto-unload a loaded model after 5 min idle. The V620 instance sets this and
+# this one did not, so the LLM squatted the 16 GB card indefinitely (llama-swap
+# reported ttl:0 for every running model) instead of releasing it for games and
+# the other workers. Reload on the next request costs the usual first-token
+# latency, which healthCheckTimeout above already covers.
+globalTTL: 300
+
+# Auto-assign starting port. Must be unique per llama-swap instance on this host
+# (colibri/coli uses 5800 by default for the GLM CPU service; V620 llama-swap
+# uses 5810, CPU llama-swap uses 5820, so this RDNA4 one gets 5830+).
+startPort: ${STARTPORT_CHAT}
+
+groups:
+  chat-16gb:
+    swap: true
+    exclusive: true
+    persistent: false
+    members:
+      - gemma-4-12b
+      - minicpm5-2b
+      - qwen3-8b
+
+models:
+  gemma-4-12b:
+    name: "Gemma 4 12B (Google DeepMind, QAT Q4_0)"
+    # Per-model override of globalTTL (300 s) above. Gemma is the *interactive*
+    # chat model, unlike the burst-worker models the 5-minute TTL was sized for:
+    # a 5-minute idle window evicts it mid-conversation, and the cold reload can
+    # take up to healthCheckTimeout (500 s). That reload latency is what made
+    # DSH's stream-idle watchdog fire ("pi-ai stream idle timeout after
+    # 300000ms") in the "RTSM Restart" session.
+    # 3600 s resets on every request, so an active session never trips it, while
+    # the 16 GB card still frees itself after an hour idle (games / other
+    # workers). 0 would disable unloading entirely; -1 would re-inherit 300.
+    ttl: 3600
+    cmd: |
+      ${LLAMA_SERVER}
+        --model ${GEMMA_GGUF}
+        --mmproj ${GEMMA_MMPROJ}
+        --alias gemma-4-12b
+        --host 127.0.0.1 --port ${PORT}
+        --ctx-size 131072
+        --n-gpu-layers 99
+        --threads 6 --threads-batch 8 --parallel 1
+        --batch-size 2048 --ubatch-size 512
+        -ctk q8_0 -ctv q8_0
+        --flash-attn auto --load-mode mmap
+        --jinja
+        --temp 0.7 --top-p 0.95 --top-k 20
+    env:
+      # UUID, not index — see .env.example "GPU selection". Empty = only card.
+      - "HIP_VISIBLE_DEVICES=${GPU_CHAT_UUID}"
+      # Empty THEROCK_LIB = system ROCm (glibc treats empty LD_LIBRARY_PATH as unset).
+      - "LD_LIBRARY_PATH=${THEROCK_LIB}"
+    aliases:
+      - gemma-local
+
+  minicpm5-2b:
+    name: "MiniCPM5-2B (OpenBMB, Q8_0) — on-device 2.5B with 131K ctx"
+    cmd: |
+      ${LLAMA_SERVER}
+        --model ${MINICPM_GGUF}
+        --alias minicpm5-2b
+        --host 127.0.0.1 --port ${PORT}
+        --ctx-size 131072
+        --n-gpu-layers 99
+        --threads 6 --threads-batch 8 --parallel 1
+        --batch-size 2048 --ubatch-size 512
+        -ctk q8_0 -ctv q8_0
+        --flash-attn auto --load-mode mmap
+        --jinja
+        --temp 0.7 --top-p 0.95 --top-k 20
+    env:
+      - "HIP_VISIBLE_DEVICES=${GPU_CHAT_UUID}"
+      - "LD_LIBRARY_PATH=${THEROCK_LIB}"
+    aliases:
+      - minicpm5
+      - cpm5
+
+  qwen3-8b:
+    name: "Qwen3-8B (Alibaba, Q4_K_M) — subagent workhorse, 2 slots"
+    # The subagent worker: 4.7 GB of weights + ~7.1 GB q8 KV at 96k total, so
+    # --parallel 2 gives each slot 48k. Two subagents run at once on one card,
+    # which is the thing Strata took away from the V620. 30 min TTL: subagent
+    # bursts are short, and the card should return to the desktop between them.
+    ttl: 1800
+    cmd: |
+      ${LLAMA_SERVER}
+        --model ${QWEN8B_GGUF}
+        --alias qwen3-8b
+        --host 127.0.0.1 --port ${PORT}
+        --ctx-size 98304
+        --n-gpu-layers 99
+        --threads 6 --threads-batch 8
+        --parallel 2
+        --batch-size 2048 --ubatch-size 512
+        -ctk q8_0 -ctv q8_0
+        --flash-attn auto --load-mode mmap
+        --jinja
+        --temp 0.6 --top-p 0.95 --top-k 20
+    env:
+      - "HIP_VISIBLE_DEVICES=${GPU_CHAT_UUID}"
+      - "LD_LIBRARY_PATH=${THEROCK_LIB}"
+    aliases:
+      - qwen-local-8b

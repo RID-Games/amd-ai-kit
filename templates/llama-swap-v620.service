@@ -1,0 +1,25 @@
+[Unit]
+Description=llama-swap on AMD Radeon Pro V620 (GPU 0) — Qwen3.8-27B with MTP speculative decode
+Documentation=https://github.com/mostlygeek/llama-swap
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=${REQUIRES_MOUNT}
+
+[Service]
+Type=simple
+WorkingDirectory=${WORKDIR}
+ExecStart=${LLAMA_SWAP_BIN} \
+    --config ${CONFIG_DIR}/llama-swap-v620.yaml \
+    --listen :${PORT_LLM}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

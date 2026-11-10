@@ -1,0 +1,70 @@
+# llama-swap config — CPU RAM (no GPU)
+# Manages the GLM-5.3-Flash model on CPU via colibri's CPU expert-streaming.
+# colibri is a Python parent that spawns a custom 'glm53' C child process for
+# inference. llama-swap treats it as any OpenAI-compatible server.
+#
+# The cmd uses ${PORT} so llama-swap assigns a unique internal port. The
+# external listen address is set by the systemd unit (--listen :${PORT_CPU}).
+#
+# Rendered from template by install.sh — edit .env, not this file.
+
+healthCheckTimeout: 120
+logLevel: info
+logToStdout: both
+sendLoadingState: false
+
+# Auto-assign starting port. 5820 is for CPU llama-swap (per-host unique).
+# colibri/coli uses 5800 for its own service, the RDNA4 llama-swap uses 5830+,
+# llama-swap-v620 uses 5810. So CPU gets 5820+.
+startPort: ${STARTPORT_CPU}
+
+# Auto-unload glm-5.3-flash after 5 min idle. This instance was the last one
+# without a TTL, so llama-swap reported ttl:0 and the model squatted ~9 GB of
+# RAM and swap forever. On 2026-10-05 a *cancelled* architect request left it
+# resident, swap filled to 22/23 GB, and qwen3.8-27b's 20.5 GB mmap load could
+# not fault its pages in fast enough — it failed llama-swap-v620's health check
+# at 5m0s twice in a row. GLM wants ~21 GB and qwen ~20.5 GB, so the two cannot
+# both be resident on a 31 GB box; this is what makes GLM yield.
+globalTTL: 300
+
+models:
+  glm-5.3-flash:
+    name: "GLM-5.3-Flash (Zhipu, CPU expert-streaming via colibri)"
+    # GLM53_EXPERT_GB pins the expert LRU cache. Unset, colibri auto-sizes it to
+    # (MemAvailable - 3 GB) at load time — on this box that made glm53 grab
+    # ~13 GB on top of its ~13.5 GB dense resident portion and the kernel
+    # OOM-killed it (2026-09-05, 3 kills). Pin it small; disk streams the rest.
+    # NOTE: llama-swap does NOT run cmd through a shell — env must use the
+    # dedicated env: list, not a VAR=x command prefix (that fails exec).
+    #
+    # Vulkan on the V620 (2026-09-05): dense matmuls + MLA attention run on the
+    # GPU (~2.3x faster: 13.6 vs 31.3 s/tok). REQUIRES the no_vk patch in
+    # glm53.c (streamed experts must stay off VRAM arenas) and
+    # vm.min_free_kbytes=1048576 (99-glm-reserve.conf). COLI_NO_OMP_TUNE=1 is
+    # load-bearing — without it OMP spin-wait starves the async I/O pool.
+    env:
+      - GLM53_EXPERT_GB=${GLM53_EXPERT_GB}
+      - COLI_VULKAN=1
+      - COLI_VK_DENSE=1
+      - COLI_VK_ATTN=1
+      - COLI_VK_EXPERTS=6000
+      - COLI_VK_RESERVE_GB=2
+      - COLI_NO_OMP_TUNE=1
+      - COLI_VK_SHADERS=${VK_SHADERS_DIR}
+      # Pin Vulkan to the AMD radv driver only. Both the V620 and the GTX 1060
+      # are "discrete" GPUs, and colibri's device picker takes the first
+      # discrete device it enumerates — which the NVIDIA ICD (nvidia_icd.json)
+      # served first, so colibri ran dense/attention on the 1060's 246 MB
+      # host-visible window at CPU-slower speeds. Excluding the NVIDIA ICD
+      # leaves only radv, so the picker selects the V620.
+      - VK_DRIVER_FILES=${VK_DRIVER_FILES}
+    cmd: |
+      ${COLI_BIN} serve
+        --model ${GLM_MODEL_DIR}
+        --host 127.0.0.1 --port ${PORT}
+        --no-think
+        --model-id glm-5.3-flash
+        --ctx 8192
+        --queue-timeout 900
+    aliases:
+      - glm-local
